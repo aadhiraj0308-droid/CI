@@ -16,27 +16,34 @@ jobs:
           POSTGRES_USER: ci_user
           POSTGRES_PASSWORD: ci_pass
           POSTGRES_DB: ci_db
-        ports:
-          - 5432:5432
+        # no host port mapping required for Actions service; runner can reach it at localhost:5432
         options: >-
-          --health-cmd "pg_isready -U ci_user -d ci_db" 
+          --health-cmd "pg_isready -U ci_user -d ci_db"
           --health-interval 10s --health-timeout 5s --health-retries 5
 
     env:
       # used by backend to run tests against the service
       DATABASE_URL: postgres://ci_user:ci_pass@localhost:5432/ci_db
-      # set any other ENV variables your tests require here
-      # e.g. SECRET_KEY: test-secret
+      # set any other ENV variables your tests require here, e.g. SECRET_KEY: test-secret
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install pg_isready (postgres client)
+        run: |
+          # ensure pg_isready is available on the runner
+          sudo apt-get update -y
+          sudo apt-get install -y postgresql-client
+
       - name: Wait for Postgres to be healthy
         run: |
-          echo "Waiting for Postgres..."
-          for i in {1..15}; do
-            pg_isready -h localhost -p 5432 -U ci_user && break
+          echo "Waiting for Postgres to be healthy..."
+          for i in {1..30}; do
+            if pg_isready -h localhost -p 5432 -U ci_user -d ci_db >/dev/null 2>&1 ; then
+              echo "Postgres is ready!"
+              break
+            fi
             echo "Postgres not ready yet... ($i)"
             sleep 2
           done
@@ -50,9 +57,13 @@ jobs:
         working-directory: ./backend
         run: |
           python -m pip install --upgrade pip
-          if [ -f "requirements-dev.txt" ]; then pip install -r requirements-dev.txt; fi
-          # fallback: try pip install -r requirements.txt if you don't use a dev file
-          if [ ! -f "requirements-dev.txt" ] && [ -f "requirements.txt" ]; then pip install -r requirements.txt; fi
+          if [ -f "requirements-dev.txt" ]; then
+            pip install -r requirements-dev.txt
+          elif [ -f "requirements.txt" ]; then
+            pip install -r requirements.txt
+          else
+            echo "No requirements file found in ./backend — skipping pip install."
+          fi
 
       - name: Run DB migrations (optional)
         if: ${{ always() }}
@@ -76,14 +87,22 @@ jobs:
       - name: Install & build frontend
         working-directory: ./frontend
         run: |
-          npm ci
-          npm run lint || true
-          npm run build
+          if [ -f package.json ]; then
+            npm ci
+            npm run lint || true
+            npm run build
+          else
+            echo "No frontend/package.json found in ./frontend — skipping frontend build."
+          fi
 
-      - name: (Optional) Run Playwright E2E (if present)
-        if: ${{ fileExists('frontend/playwright.config.ts') || fileExists('playwright.config.js') }}
+      - name: (Optional) Run Playwright E2E (if config exists)
         working-directory: ./frontend
         run: |
-          npm ci
-          npx playwright install --with-deps
-          npx playwright test --reporter=list
+          # This step will only run Playwright if a config file exists.
+          if [ -f "playwright.config.ts" ] || [ -f "playwright.config.js" ] || grep -q "playwright" package.json 2>/dev/null; then
+            npm ci
+            npx playwright install --with-deps
+            npx playwright test --reporter=list
+          else
+            echo "Playwright not detected — skipping E2E."
+          fi
