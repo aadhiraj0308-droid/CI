@@ -1,0 +1,89 @@
+name: CI - Tests & Build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: ci_user
+          POSTGRES_PASSWORD: ci_pass
+          POSTGRES_DB: ci_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci_user -d ci_db" 
+          --health-interval 10s --health-timeout 5s --health-retries 5
+
+    env:
+      # used by backend to run tests against the service
+      DATABASE_URL: postgres://ci_user:ci_pass@localhost:5432/ci_db
+      # set any other ENV variables your tests require here
+      # e.g. SECRET_KEY: test-secret
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Wait for Postgres to be healthy
+        run: |
+          echo "Waiting for Postgres..."
+          for i in {1..15}; do
+            pg_isready -h localhost -p 5432 -U ci_user && break
+            echo "Postgres not ready yet... ($i)"
+            sleep 2
+          done
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install backend deps
+        working-directory: ./backend
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f "requirements-dev.txt" ]; then pip install -r requirements-dev.txt; fi
+          # fallback: try pip install -r requirements.txt if you don't use a dev file
+          if [ ! -f "requirements-dev.txt" ] && [ -f "requirements.txt" ]; then pip install -r requirements.txt; fi
+
+      - name: Run DB migrations (optional)
+        if: ${{ always() }}
+        working-directory: ./backend
+        run: |
+          # uncomment / update the command below if you use alembic / django etc.
+          # alembic upgrade head
+          # or for Django: python manage.py migrate --noinput
+          echo "Run migrations here if you have migrations configured."
+
+      - name: Run backend tests (pytest)
+        working-directory: ./backend
+        run: |
+          pytest -q --maxfail=1
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install & build frontend
+        working-directory: ./frontend
+        run: |
+          npm ci
+          npm run lint || true
+          npm run build
+
+      - name: (Optional) Run Playwright E2E (if present)
+        if: ${{ fileExists('frontend/playwright.config.ts') || fileExists('playwright.config.js') }}
+        working-directory: ./frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps
+          npx playwright test --reporter=list
